@@ -83,7 +83,8 @@ function sanitize_variables() {
 
 function check_variables() {
     check_variables_value "KEYS" "$KEYS"
-    check_variables_boolean "LOG" "$LOG"
+    check_variables_boolean "LOG_TRACE" "$LOG_TRACE"
+    check_variables_boolean "LOG_FILE" "$LOG_FILE"
     check_variables_value "DEVICE" "$DEVICE"
     check_variables_boolean "DEVICE_TRIM" "$DEVICE_TRIM"
     check_variables_boolean "LVM" "$LVM"
@@ -182,7 +183,8 @@ function warning() {
 function init() {
     print_step "init()"
 
-    init_log "$LOG" "$ALIS_LOG_FILE"
+    init_log_trace "$LOG_TRACE"
+    init_log_file "$LOG_FILE" "$ALIS_LOG_FILE"
     loadkeys "$KEYS"
 }
 
@@ -461,8 +463,10 @@ function partition() {
     fi
 
     # format
-    wipefs -a -f $PARTITION_BOOT || true
-    wipefs -a -f $DEVICE_ROOT || true
+
+    # Is this workaround really necessary?
+    #wipefs -a -f $PARTITION_BOOT || true
+    #wipefs -a -f $DEVICE_ROOT || true
 
     if [ "$BIOS_TYPE" == "uefi" ]; then
         mkfs.fat -n ESP -F32 $PARTITION_BOOT
@@ -470,7 +474,9 @@ function partition() {
     if [ "$BIOS_TYPE" == "bios" ]; then
         mkfs.ext4 -L boot $PARTITION_BOOT
     fi
-    if [ "$FILE_SYSTEM_TYPE" == "f2fs" -o "$FILE_SYSTEM_TYPE" == "reiserfs" ]; then
+    if [ "$FILE_SYSTEM_TYPE" == "reiserfs" ]; then
+        mkfs."$FILE_SYSTEM_TYPE" -f -l root $DEVICE_ROOT
+    elif [ "$FILE_SYSTEM_TYPE" == "f2fs" ]; then
         mkfs."$FILE_SYSTEM_TYPE" -l root $DEVICE_ROOT
     else
         mkfs."$FILE_SYSTEM_TYPE" -L root $DEVICE_ROOT
@@ -521,6 +527,7 @@ function partition() {
 
 function install() {
     print_step "install()"
+    local COUNTRIES=()
 
     pacman -Sy --noconfirm archlinux-keyring
 
@@ -528,7 +535,6 @@ function install() {
         echo "Server = $PACMAN_MIRROR" > /etc/pacman.d/mirrorlist
     fi
     if [ "$REFLECTOR" == "true" ]; then
-        local COUNTRIES=()
         for COUNTRY in "${REFLECTOR_COUNTRIES[@]}"; do
             local COUNTRIES+=(--country "${COUNTRY}")
         done
@@ -543,13 +549,45 @@ function install() {
         sed -i 's/#ParallelDownloads\(.*\)/#ParallelDownloads\1\nDisableDownloadTimeout/' /etc/pacman.conf
     fi
 
-    pacstrap /mnt base base-devel linux linux-firmware
+    local PACKAGES=()
+    if [ "$LVM" == "true" ]; then
+        local PACKAGES+=("lvm2")
+    fi
+    if [ "$FILE_SYSTEM_TYPE" == "btrfs" ]; then
+        local PACKAGES+=("btrfs-progs")
+    fi
+    if [ "$FILE_SYSTEM_TYPE" == "xfs" ]; then
+        local PACKAGES+=("xfsprogs")
+    fi
+    if [ "$FILE_SYSTEM_TYPE" == "f2fs" ]; then
+        local PACKAGES+=("f2fs-tools")
+    fi
+    if [ "$FILE_SYSTEM_TYPE" == "reiserfs" ]; then
+        local PACKAGES+=("reiserfsprogs")
+    fi
+
+    pacstrap /mnt base base-devel linux linux-firmware "${PACKAGES[@]}"
 
     sed -i 's/#Color/Color/' /mnt/etc/pacman.conf
     if [ "$PACMAN_PARALLEL_DOWNLOADS" == "true" ]; then
         sed -i 's/#ParallelDownloads/ParallelDownloads/' /mnt/etc/pacman.conf
     else
         sed -i 's/#ParallelDownloads\(.*\)/#ParallelDownloads\1\nDisableDownloadTimeout/' /mnt/etc/pacman.conf
+    fi
+
+    if [ "$REFLECTOR" == "true" ]; then
+        pacman_install "reflector"
+        cat <<EOT > /mnt/etc/xdg/reflector/reflector.conf
+${COUNTRIES[@]}
+--latest 25
+--age 24
+--protocol https
+--completion-percent 100
+--sort rate
+--save /etc/pacman.d/mirrorlist
+EOT
+        arch-chroot /mnt reflector "${COUNTRIES[@]}" --latest 25 --age 24 --protocol https --completion-percent 100 --sort rate --save /etc/pacman.d/mirrorlist
+        arch-chroot /mnt systemctl enable reflector.timer
     fi
 
     if [ "$PACKAGES_MULTILIB" == "true" ]; then
@@ -662,21 +700,6 @@ function mkinitcpio_configuration() {
         fi
     fi
 
-    if [ "$LVM" == "true" ]; then
-        pacman_install "lvm2"
-    fi
-    if [ "$FILE_SYSTEM_TYPE" == "btrfs" ]; then
-        pacman_install "btrfs-progs"
-    fi
-    if [ "$FILE_SYSTEM_TYPE" == "xfs" ]; then
-        pacman_install "xfsprogs"
-    fi
-    if [ "$FILE_SYSTEM_TYPE" == "f2fs" ]; then
-        pacman_install "f2fs-tools"
-    fi
-    if [ "$FILE_SYSTEM_TYPE" == "reiserfs" ]; then
-        pacman_install "reiserfsprogs"
-    fi
     if [ "$LVM" == "true" ]; then
         HOOKS=$(echo $HOOKS | sed 's/!lvm2/lvm2/')
     fi
